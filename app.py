@@ -102,17 +102,33 @@ async def send_sms(req: Request):
     customer_text = build_customer_text(site, vd, vt_label, name, phone)
     admin_text    = build_admin_text(site, vd, vt_label, name, phone, memo)
 
-    results = {}
+        results = {}
     try:
-        # 1) 고객에게 전송
-        results["customer"] = svc.send({"to": phone, "from": sender, "text": customer_text})
+        def send_msg(msg):
+            # SDK 버전에 따라 존재하는 메서드가 달라서 안전하게 순차 시도
+            if hasattr(svc, "send_many"):
+                return getattr(svc, "send_many")([msg])        # messages 배열로 전달
+            if hasattr(svc, "sendOne"):
+                return getattr(svc, "sendOne")(msg)            # camelCase 버전
+            if hasattr(svc, "send_one"):
+                return getattr(svc, "send_one")(msg)           # snake_case 버전
+            if hasattr(svc, "send"):
+                try:
+                    # 일부 버전은 dict 하나를 받기도 함
+                    return getattr(svc, "send")(msg)
+                except Exception:
+                    # dict가 안 되면 messages 배열로 재시도
+                    return getattr(svc, "send")({"messages": [msg]})
+            # 위가 다 없을 경우(거의 없음)
+            raise RuntimeError("Solapi SDK: no valid send method found")
 
-        # 2) 관리자(sp)가 있으면 관리자에게도 전송
+        # 1) 고객에게 전송
+        results["customer"] = send_msg({"to": phone, "from": sender, "text": customer_text})
+
+        # 2) 관리자(sp)에게도 전송(옵션)
         if admin_sp:
             if not re.fullmatch(r"\d{9,12}", admin_sp):
                 return {"ok": False, "error": "관리자번호(sp) 형식 오류(숫자만 9~12자리)"}
-            results["admin"] = svc.send({"to": admin_sp, "from": sender, "text": admin_text})
+            results["admin"] = send_msg({"to": admin_sp, "from": sender, "text": admin_text})
 
         return {"ok": True, "result": results}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
