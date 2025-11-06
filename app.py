@@ -1,69 +1,118 @@
-import os
+import os, re
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from solapi import SolapiMessageService
 
+# ========= 환경변수 =========
+SOLAPI_API_KEY    = os.getenv("SOLAPI_API_KEY", "")
+SOLAPI_API_SECRET = os.getenv("SOLAPI_API_SECRET", "")
+ENV_SENDER        = os.getenv("SOLAPI_SENDER", "")  # 발신번호(숫자만, 솔라피 등록/승인)
+
+if not (SOLAPI_API_KEY and SOLAPI_API_SECRET and ENV_SENDER):
+    raise RuntimeError("ENV 누락: SOLAPI_API_KEY / SOLAPI_API_SECRET / SOLAPI_SENDER")
+
+svc = SolapiMessageService(SOLAPI_API_KEY, SOLAPI_API_SECRET)
+
+# ========= FastAPI & CORS =========
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 운영 시 도메인으로 좁히세요 (예: https://*.vercel.app)
+    allow_credentials=False,
+    allow_methods=["POST", "OPTIONS", "GET"],
+    allow_headers=["Content-Type"],
+)
+
+# ========= 유틸 =========
+DIGITS = re.compile(r"[^\d]")
+def only_digits(s: str) -> str:
+    return DIGITS.sub("", s or "")
+
+def build_customer_text(site: str, vd: str, vt_label: str, name: str, phone: str) -> str:
+    # 고객에게 보내는 본문
+    lines = [
+        f"[{site}] 방문예약 접수" if site else "[방문예약] 접수",
+        f"날짜: {vd or '-'}",
+        f"시간: {vt_label or '-'}",
+        f"성함: {name or '-'}",
+    ]
+    return "\n".join(lines)
+
+def build_admin_text(site: str, vd: str, vt_label: str, name: str, phone: str, memo: str) -> str:
+    # 관리자(sp)에게 보내는 알림(고객 번호 포함)
+    lines = [
+        f"[알림] {site or '현장'} 방문예약 도착",
+        f"날짜: {vd or '-'}",
+        f"시간: {vt_label or '-'}",
+        f"성함: {name or '-'}",
+        f"연락처(고객): {phone or '-'}",
+    ]
+    if memo:
+        lines.append(f"메모: {memo}")
+    return "\n".join(lines)
+
+# ========= 라우터 =========
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+@app.options("/sms")
+async def _options_sms():
+    return {"ok": True}
 
 @app.post("/sms")
-async def sms(request: Request):
-"""
-프런트에서 JSON 예시:
-{
-"site": "보라매",
-"vd": "2025-11-06",
-"vtLabel": "10:00 ~ 11:00",
-"name": "[보라매] 홍길동", # 태깅을 프런트에서 붙이는 경우
-"phone": "010-1234-5678",
-"memo": "선택"
-}
-"""
-body = await request.json()
+async def send_sms(req: Request):
+    """
+    요청(JSON):
+    {
+      "site": "보라매",
+      "vd": "2025-11-06",
+      "vtLabel": "10:00 ~ 11:00",
+      "name": "[보라매] 홍길동",
+      "phone": "01012345678",        # 고객 번호 (필수)
+      "sp": "01099998888",           # 관리자 번호 (선택) → 있으면 관리자에게도 발송
+      "memo": ""
+    }
+    """
+    body = await req.json()
 
+    site     = (body.get("site") or "").strip()
+    vd       = (body.get("vd") or "").strip()
+    vt_label = (body.get("vtLabel") or "").strip()
+    name     = (body.get("name") or "").strip()
+    phone    = only_digits(body.get("phone"))  # 고객
+    memo     = (body.get("memo") or "").strip()
+    admin_sp = only_digits(body.get("sp") or "")  # 관리자 (선택)
 
-site = (body.get("site") or "").strip()
-vd = (body.get("vd") or "").strip()
-vt_label = (body.get("vtLabel") or "").strip()
-name = (body.get("name") or "").strip()
-phone = normalize_phone(body.get("phone"))
-memo = (body.get("memo") or "").strip()
+    sender = only_digits(ENV_SENDER)
 
+    # 기본 검증
+    if not name:
+        return {"ok": False, "error": "name 누락"}
+    if not vd:
+        return {"ok": False, "error": "vd(방문일) 누락"}
+    if not phone:
+        return {"ok": False, "error": "phone(고객) 누락"}
+    if not re.fullmatch(r"\d{9,12}", phone):
+        return {"ok": False, "error": "수신번호(고객) 형식 오류(숫자만 9~12자리)"}
+    if not re.fullmatch(r"\d{9,12}", sender):
+        return {"ok": False, "error": "발신번호 형식 오류 또는 미등록"}
 
-# 필수값 검증
-if not name:
-return {"ok": False, "error": "name 누락"}
-if not vd:
-return {"ok": False, "error": "vd(방문일) 누락"}
-if not phone:
-return {"ok": False, "error": "phone 누락"}
-if not re.fullmatch(r"\d{9,12}", phone):
-return {"ok": False, "error": "수신번호 형식 오류(숫자만)"}
+    # 본문 생성
+    customer_text = build_customer_text(site, vd, vt_label, name, phone)
+    admin_text    = build_admin_text(site, vd, vt_label, name, phone, memo)
 
+    results = {}
+    try:
+        # 1) 고객에게 전송
+        results["customer"] = svc.send({"to": phone, "from": sender, "text": customer_text})
 
-# 발신번호도 숫자만
-sender = normalize_phone(SOLAPI_SENDER)
-if not re.fullmatch(r"\d{9,12}", sender):
-return {"ok": False, "error": "발신번호 형식 오류 또는 미등록"}
+        # 2) 관리자(sp)가 있으면 관리자에게도 전송
+        if admin_sp:
+            if not re.fullmatch(r"\d{9,12}", admin_sp):
+                return {"ok": False, "error": "관리자번호(sp) 형식 오류(숫자만 9~12자리)"}
+            results["admin"] = svc.send({"to": admin_sp, "from": sender, "text": admin_text})
 
-
-# 문자 본문
-lines = [
-f"[{site}] 방문예약 접수" if site else "[방문예약] 접수",
-f"날짜: {vd}",
-f"시간: {vt_label or '-'}",
-f"성함: {name}",
-f"연락처: {phone}",
-]
-if memo:
-lines.append(f"메모: {memo}")
-text = "\n".join(lines)
-
-
-# 발송
-try:
-res = message_service.send({
-"to": phone,
-"from": sender,
-"text": text,
-})
-# res: groupId, messageId 등 포함
-return {"ok": True, "result": res}
-except Exception as e:
-# Render Logs에서 traceback 확인
-return {"ok": False, "error": str(e)}
+        return {"ok": True, "result": results}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
