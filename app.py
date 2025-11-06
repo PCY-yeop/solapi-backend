@@ -87,31 +87,42 @@ async def sms(req: Request):
     admin_text = build_admin_text(site, vd, vt_label, name, phone, memo)
 
     try:
+        debug_used = None
+
         def send_msg(msg: dict):
-            """
-            SDK 버전별 시그니처 차이를 흡수:
-            - send_one / sendOne : {"message": {...}}
-            - send_many / sendMany: {"messages": [{...}]}
-            - send : 보통 {"message": {...}}를 받음 (안되면 messages로 재시도)
-            """
-            if hasattr(svc, "send_one"):
-                return getattr(svc, "send_one")({"message": msg})
-            if hasattr(svc, "sendOne"):
-                return getattr(svc, "sendOne")({"message": msg})
+            nonlocal debug_used
+
+            # ✅ 1) 가장 먼저 "messages" 배열을 받는 다건 메서드로 시도
             if hasattr(svc, "send_many"):
+                debug_used = "send_many(messages)"
                 return getattr(svc, "send_many")({"messages": [msg]})
             if hasattr(svc, "sendMany"):
+                debug_used = "sendMany(messages)"
                 return getattr(svc, "sendMany")({"messages": [msg]})
+
+            # ✅ 2) 단건 메서드 시그니처 (message) 로 시도
+            if hasattr(svc, "send_one"):
+                debug_used = "send_one(message)"
+                return getattr(svc, "send_one")({"message": msg})
+            if hasattr(svc, "sendOne"):
+                debug_used = "sendOne(message)"
+                return getattr(svc, "sendOne")({"message": msg})
+
+            # ✅ 3) 일반 send(버전 따라 message 또는 messages)
             if hasattr(svc, "send"):
                 try:
+                    debug_used = "send(message)"
                     return getattr(svc, "send")({"message": msg})
                 except Exception:
+                    debug_used = "send(messages)"
                     return getattr(svc, "send")({"messages": [msg]})
-            raise RuntimeError("Solapi SDK: send 메서드를 찾을 수 없음")
 
-        # 관리자에게만 전송
+            raise RuntimeError("Solapi SDK: send 계열 메서드를 찾을 수 없음")
+
+        # 관리자에게만 발송
         res = send_msg({"to": admin_sp, "from": sender, "text": admin_text})
-        return {"ok": True, "result": {"admin": res}}
+
+        return {"ok": True, "used": debug_used, "result": {"admin": res}}
 
     except Exception as e:
         return {"ok": False, "error": str(e)}
