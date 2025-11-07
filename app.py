@@ -158,7 +158,6 @@ async def sms(req: Request):
       "name": "홍길동",
       "phone": "01012341234",
       "memo": ""
-      // sp는 무시됨 (고정 정책)
     }
     """
     body = await req.json()
@@ -182,15 +181,9 @@ async def sms(req: Request):
     if not re.fullmatch(r"\d{9,12}", admin_phone):
         return {"ok": False, "error": "ENV_SENDER 형식 오류(숫자 9~12자리) 또는 미등록"}
 
-    # ---- 실시간 등록 상태 확인: admin_phone이 등록/승인되어 있어야 함 ----
-    registered = fetch_registered_senders()
-    if (admin_phone not in registered) and (not ALLOW_UNREGISTERED):
-        return {"ok": False, "error": "ENV_SENDER가 솔라피에 등록/승인되지 않았습니다."}
-
-    # ---- 본문 구성 ----
+    # ---- **강제 동작**: 무조건 from == to == admin_phone (등록 여부 무시) ----
     text = build_admin_text(site, vd, vt_label, name, phone, memo)
 
-    # ---- 전송: from == to == admin_phone ----
     payload = {
         "messages": [
             {
@@ -210,7 +203,7 @@ async def sms(req: Request):
             res_json = {"raw": r.text}
 
         if r.status_code // 100 != 2:
-            # 솔라피 원문 에러를 그대로 노출(디버깅 용이)
+            # 솔라피 에러(원문) 그대로 반환
             return {"ok": False, "status": r.status_code, "detail": res_json}
 
         return {
@@ -218,7 +211,8 @@ async def sms(req: Request):
             "result": res_json,
             "from_used": admin_phone,
             "to_used": admin_phone,
-            "allow_unregistered": ALLOW_UNREGISTERED
+            "forced_from": True
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
