@@ -56,11 +56,11 @@ def solapi_headers():
         "Content-Type": "application/json; charset=utf-8",
         "Authorization": f"HMAC-SHA256 apiKey={SOLAPI_API_KEY}, date={date}, salt={salt}, signature={signature}",
     }
-
 def build_admin_text(site, vd, vt_label, name, phone, memo):
-    site_disp = site or ""
-    if site_disp and not(site_disp.startswith("[") and site_disp.endswith("]")):
-        site_disp = f"[{site_disp}]"
+
+    s = (site or "").strip()
+    site_disp = re.sub(r'^\[(.*)\]$', r'\1', s)
+
     time_disp = (vt_label or "").strip() or "-"
     return "\n".join([
         f"현장 : {site_disp}",
@@ -68,9 +68,9 @@ def build_admin_text(site, vd, vt_label, name, phone, memo):
         f"시간 : {time_disp}",
         f"이름 : {name}",
         f"연락처 : {phone}",
-        # memo가 필요하면 아래 주석 해제
-        # f"메모 : {memo}" if memo else "",
     ]).strip()
+
+
 
 # ===== 단건 전송 엔드포인트 =====
 SOLAPI_SEND_URL = "https://api.solapi.com/messages/v4/send"
